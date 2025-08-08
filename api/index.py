@@ -1,14 +1,15 @@
 # file: api/index.py
 import os
-# import pandas as pd -> Hapus pandas
-import csv # -> Impor pustaka csv bawaan Python
+import csv
 import torch
 import torch.nn as nn
+import torch.quantization # -> Diperlukan untuk memuat model terkuantisasi
 import re
 import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
+# Inisialisasi Aplikasi Flask
 app = Flask(__name__)
 CORS(app)
 
@@ -20,7 +21,9 @@ MODEL_ASSETS_DIR = os.path.join(PROJECT_ROOT, 'model_assets')
 
 NORMALIZATION_CSV_PATH = os.path.join(MODEL_ASSETS_DIR, 'kamus_normalisasi.csv')
 VOCAB_JSON_PATH = os.path.join(MODEL_ASSETS_DIR, 'vocab.json')
-SAVED_MODEL_PATH = os.path.join(MODEL_ASSETS_DIR, 'production_model_atae-lstm.pt')
+# Pastikan path ini menunjuk ke file model yang sudah dikecilkan (terkuantisasi)
+SAVED_MODEL_PATH = os.path.join(MODEL_ASSETS_DIR, 'production_model_atae-lstm_quantized.pt')
+
 
 # --- Parameter Tetap ---
 EMBED_DIM, HIDDEN_DIM, DROPOUT = 100, 200, 0.1
@@ -36,7 +39,7 @@ VALUE_TO_SENTIMENT_LABEL = {
 # ==============================================================================
 # --- DEFINISI MODEL & FUNGSI HELPER ---
 # ==============================================================================
-# Fungsi helper baru untuk memuat kamus normalisasi tanpa pandas
+# Fungsi helper untuk memuat kamus normalisasi tanpa pandas
 def load_normalization_dict(path):
     normalization_dict = {}
     with open(path, mode='r', encoding='utf-8') as infile:
@@ -47,7 +50,6 @@ def load_normalization_dict(path):
     return normalization_dict
 
 class Attention(nn.Module):
-    # ... (Kelas ini tidak berubah)
     def __init__(self, hidden_dim, embed_dim):
         super().__init__()
         self.transform = nn.Linear(hidden_dim + embed_dim, hidden_dim)
@@ -61,7 +63,6 @@ class Attention(nn.Module):
         return context_vector
 
 class ATAELSTM(nn.Module):
-    # ... (Kelas ini tidak berubah)
     def __init__(self, vocab_size, embed_dim, hidden_dim, output_dim, dropout):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
@@ -83,26 +84,38 @@ class ATAELSTM(nn.Module):
         return self.fc(self.dropout(context_vector))
 
 # --- Memuat aset sekali saat server dimulai ---
+model = None
 try:
-    # Muat kamus normalisasi menggunakan fungsi helper baru
+    # Muat kamus normalisasi dan vocabulary
     normalization_dict = load_normalization_dict(NORMALIZATION_CSV_PATH)
-
-    # Muat vocabulary dari file JSON
     with open(VOCAB_JSON_PATH, 'r', encoding='utf-8') as f:
         word_to_idx = json.load(f)
 
-    # Inisialisasi dan muat model
+    # --- BLOK PEMUATAN MODEL TERKUANTISASI ---
     device = torch.device('cpu')
-    model = ATAELSTM(len(word_to_idx), EMBED_DIM, HIDDEN_DIM, len(IDX_TO_SENTIMENT_VALUE), DROPOUT).to(device)
+
+    # 1. Buat struktur model standar terlebih dahulu
+    model_structure = ATAELSTM(len(word_to_idx), EMBED_DIM, HIDDEN_DIM, len(IDX_TO_SENTIMENT_VALUE), DROPOUT)
+    model_structure.eval()
+
+    # 2. Siapkan wrapper kuantisasi dinamis pada struktur tersebut
+    model = torch.quantization.quantize_dynamic(
+        model_structure, {torch.nn.LSTM, torch.nn.Linear}, dtype=torch.qint8
+    )
+
+    # 3. Muat bobot dari file model yang sudah terkuantisasi
     model.load_state_dict(torch.load(SAVED_MODEL_PATH, map_location=device))
-    model.eval()
+
 except Exception as e:
-    model = None
+    # Biarkan 'model' tetap None jika ada error
     print(f"Error loading model assets: {e}")
 
-# ... (Sisa kode route tidak berubah)
+# ==============================================================================
+# --- DEFINISI ROUTE ---
+# ==============================================================================
 @app.route('/')
 def home():
+    # Route ini bisa digunakan untuk health check
     return 'Backend ATAE-LSTM is running.'
 
 @app.route('/api/analyze', methods=['POST'])
@@ -116,6 +129,7 @@ def analyze_route():
 
     review_text = data['reviewText']
 
+    # Logika preprocessing dan prediksi
     text = str(review_text).lower()
     text = re.sub(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF]', '', text)
     text = ' '.join(re.sub(r"([@#][A-Za-z0-9_]+)|(\w+:\/\/\S+)", " ", text).split())
@@ -125,7 +139,8 @@ def analyze_route():
     clean_text = ' '.join(normalized_tokens)
 
     if not clean_text.strip():
-        return jsonify({aspect: "Tidak dapat diproses" for aspect in TARGET_ASPECTS})
+        # Berikan respons default jika teks kosong setelah preprocessing
+        return jsonify({aspect: VALUE_TO_SENTIMENT_LABEL.get(0) for aspect in TARGET_ASPECTS})
 
     text_indices = [word_to_idx.get(w, word_to_idx['<UNK>']) for w in clean_text.split()]
     predictions = {}
@@ -138,7 +153,7 @@ def analyze_route():
             }
             output = model(batch)
             predicted_idx = output.argmax(dim=1).item()
-            sentiment_value = IDX_TO_SENTIMENT_VALUE.get(predicted_idx, 0)
+            sentiment_value = IDX_TO_SENTIMENT_VALUE.get(predicted_idx, 0) # Default ke 'Tidak Relevan'
             sentiment_label = VALUE_TO_SENTIMENT_LABEL.get(sentiment_value, 'Error')
             predictions[aspect] = sentiment_label
 
