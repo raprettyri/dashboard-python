@@ -1,1 +1,5 @@
-Flask==3.0.3
+flask
+torch
+pandas
+openpyxl
+Flask-Cors
