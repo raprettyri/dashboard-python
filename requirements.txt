@@ -1,6 +1,4 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 flask
 torch
-pandas
-# openpyxl sudah tidak diperlukan lagi saat runtime
 Flask-Cors
