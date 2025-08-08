@@ -4,7 +4,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import re
-from collections import Counter
+import json # -> Impor pustaka json
 from flask import Flask, request, jsonify
 from flask_cors import CORS # -> Impor CORS
 
@@ -21,7 +21,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_ASSETS_DIR = os.path.join(PROJECT_ROOT, 'model_assets')
 
 NORMALIZATION_CSV_PATH = os.path.join(MODEL_ASSETS_DIR, 'kamus_normalisasi.csv')
-VOCAB_BUILDER_DATA_PATH = os.path.join(MODEL_ASSETS_DIR, 'stratified_train_long_80.xlsx')
+# Path baru menunjuk ke file vocabulary JSON yang sudah dibuat sebelumnya
+VOCAB_JSON_PATH = os.path.join(MODEL_ASSETS_DIR, 'vocab.json')
 SAVED_MODEL_PATH = os.path.join(MODEL_ASSETS_DIR, 'production_model_atae-lstm.pt')
 
 
@@ -37,10 +38,9 @@ VALUE_TO_SENTIMENT_LABEL = {
 }
 
 # ==============================================================================
-# --- DEFINISI MODEL & FUNGSI HELPER (Sama seperti di file lama Anda) ---
+# --- DEFINISI MODEL & FUNGSI HELPER ---
 # ==============================================================================
 class Attention(nn.Module):
-    # ... (salin kelas Attention dari file asli)
     def __init__(self, hidden_dim, embed_dim):
         super().__init__()
         self.transform = nn.Linear(hidden_dim + embed_dim, hidden_dim)
@@ -54,7 +54,6 @@ class Attention(nn.Module):
         return context_vector
 
 class ATAELSTM(nn.Module):
-    # ... (salin kelas ATAELSTM dari file asli)
     def __init__(self, vocab_size, embed_dim, hidden_dim, output_dim, dropout):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
@@ -77,16 +76,14 @@ class ATAELSTM(nn.Module):
 
 # --- Memuat aset sekali saat server dimulai ---
 try:
-    # ... (salin semua logika pemuatan aset dari file asli)
+    # Muat kamus normalisasi
     normalization_dict = pd.read_csv(NORMALIZATION_CSV_PATH, header=None, names=['slang', 'formal']).set_index('slang')['formal'].to_dict()
-    df_vocab = pd.read_excel(VOCAB_BUILDER_DATA_PATH)
-    all_texts_vocab = pd.concat([df_vocab['text_clean'], df_vocab['aspect']])
-    words_vocab = [word for text in all_texts_vocab for word in str(text).split()]
-    word_counts_vocab = Counter(words_vocab)
-    vocab = sorted(word_counts_vocab, key=word_counts_vocab.get, reverse=True)
-    word_to_idx = {word: i + 2 for i, word in enumerate(vocab)}
-    word_to_idx.update({'<PAD>': 0, '<UNK>': 1})
 
+    # Muat vocabulary dari file JSON (lebih cepat dan efisien)
+    with open(VOCAB_JSON_PATH, 'r', encoding='utf-8') as f:
+        word_to_idx = json.load(f)
+
+    # Inisialisasi dan muat model
     device = torch.device('cpu')
     model = ATAELSTM(len(word_to_idx), EMBED_DIM, HIDDEN_DIM, len(IDX_TO_SENTIMENT_VALUE), DROPOUT).to(device)
     model.load_state_dict(torch.load(SAVED_MODEL_PATH, map_location=device))
@@ -95,14 +92,16 @@ except Exception as e:
     model = None
     print(f"Error loading model assets: {e}")
 
-# --- Definisi Route ---
+# ==============================================================================
+# --- DEFINISI ROUTE ---
+# ==============================================================================
 @app.route('/')
 def home():
     # Route ini bisa digunakan untuk health check
     return 'Backend ATAE-LSTM is running.'
 
 @app.route('/api/analyze', methods=['POST'])
-def analyze_route(): # -> Ubah nama fungsi agar unik
+def analyze_route():
     if model is None:
         return jsonify({"error": "Model tidak berhasil dimuat di server."}), 500
 
@@ -112,7 +111,7 @@ def analyze_route(): # -> Ubah nama fungsi agar unik
 
     review_text = data['reviewText']
 
-    # ... (salin semua logika preprocessing dan prediksi dari fungsi 'analyze' lama Anda)
+    # Logika preprocessing dan prediksi
     text = str(review_text).lower()
     text = re.sub(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF]', '', text)
     text = ' '.join(re.sub(r"([@#][A-Za-z0-9_]+)|(\w+:\/\/\S+)", " ", text).split())
